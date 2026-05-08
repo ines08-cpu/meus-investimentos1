@@ -4,7 +4,7 @@ import plotly.express as px
 
 st.set_page_config(page_title="Investimentos Inês", layout="wide")
 
-st.title("📊 Gestor de Portfólio - Inês")
+st.title("📊 Gestor de Portfólio Inteligente")
 st.sidebar.header("📁 Upload de Ficheiros")
 
 def process_data(uploaded_files):
