@@ -21,9 +21,10 @@ def smart_read(file):
     sep = ';' if content.count(';') > content.count(',') else ','
     lines = content.split('\n')
     skip = 0
-    # Procura a linha do cabeçalho de forma mais abrangente
     for i, line in enumerate(lines[:25]):
-        if any(x in line for x in ['DESCRIÇÃO', 'Ticker', 'Tickers', 'ATIVO', 'APLICADO', 'Em Euros', 'Type', 'Montante', 'Juros', 'Transação']):
+        # Procura a linha de cabeçalho (case-insensitive para ser mais robusto)
+        lower_line = line.lower()
+        if any(x in lower_line for x in ['descrição', 'ticker', 'ativo', 'montante', 'transação']):
             skip = i
             break
     df = pd.read_csv(io.StringIO(content), sep=sep, skiprows=skip)
@@ -52,7 +53,7 @@ def process_data(uploaded_files):
                 if t_col and v_col:
                     temp = df.dropna(subset=[t_col])
                     for _, row in temp.iterrows():
-                        if str(row[t_col]) not in ['Ticker', 'Total', 'nan', 'ETFs']:
+                        if str(row[t_col]) not in ['Ticker', 'Total', 'nan']:
                             all_assets.append({'Ativo': row[t_col], 'Cat': 'ETF', 'Valor': clean_value(row[v_col]), 'Fonte': 'XTB'})
 
             # 3. XTB AÇÕES USD
@@ -69,31 +70,41 @@ def process_data(uploaded_files):
                 for _, row in df.iterrows():
                     all_assets.append({'Ativo': row['Ticker'], 'Cat': 'Ação (Oferta)', 'Valor': clean_value(row['Valor']), 'Fonte': 'Freedom24'})
 
-            # 5. RENDIMENTOS E CASH FLOW (Ajustado para o documento problemático)
-            # Juros (XTB)
+            # 5. RENDIMENTOS E CASH FLOW
             if "juros" in name or "capital" in name:
                 j_col = next((c for c in df.columns if 'Juros' in c), None)
                 if j_col: totals['juros'] += df[j_col].apply(clean_value).sum()
 
-            # Dividendos (XTB)
             if "dividendos" in name and "numerário" not in name:
                 d_col = next((c for c in df.columns if 'Ganhos' in c or 'Dividendo' in c), None)
                 if d_col: totals['dividendos'] += df[d_col].apply(clean_value).sum()
             
-            # Freedom24 - Transações em Numerário
-            if "transacções" in name or "numerário" in name or "cash" in name:
-                # Procura a coluna da descrição da transação e do montante
-                type_col = next((c for c in df.columns if any(x in c for x in ['Transação', 'Type', 'Description', 'Tipo'])), None)
-                val_col = next((c for c in df.columns if any(x in c for x in ['Montante', 'Amount', 'Valor'])), None)
-                
-                if type_col and val_col:
-                    # Filtra por Dividendos (captura "Dividend", "Dividendo", "Div.")
-                    divs = df[df[type_col].astype(str).str.contains('Dividen|Div\.', na=False, case=False)]
-                    totals['dividendos'] += divs[val_col].apply(clean_value).sum()
-                    
-                    # Captura Depósitos se for o relatório de Cash Operations
-                    deps = df[df[type_col].astype(str).str.contains('Deposit|Transfer|Depósito', na=False, case=False)]
-                    totals['depositos'] += abs(deps[val_col].apply(clean_value).sum())
+            # Freedom24 - Transações em Numerário (Ajuste Final)
+            if "transacções" in name or "numerário" in name:
+                # Normaliza nomes de colunas para minúsculas para facilitar a busca
+                df.columns = [c.lower() for c in df.columns]
+                if 'transação' in df.columns and 'montante' in df.columns:
+                    for _, row in df.iterrows():
+                        desc = str(row['transação'])
+                        valor = clean_value(row['montante'])
+                        moeda = str(row.get('moeda', 'EUR')).upper()
+                        
+                        # Conversão USD -> EUR (Taxa 0.92)
+                        cambio = 0.92 if moeda == 'USD' else 1.0
+                        
+                        # Captura os termos específicos indicados
+                        if any(x in desc for x in ["Dividendos", "Operações societárias", "Taxas do agente sobre o pagamento de dividendos"]):
+                            totals['dividendos'] += (valor * cambio)
+                        
+                        # Captura depósitos
+                        if 'Transferência bancária' in desc:
+                            totals['depositos'] += abs(valor * cambio)
+
+            if "cash" in name or "operations" in name:
+                if 'Type' in df.columns and 'Amount' in df.columns:
+                    totals['depositos'] += abs(df[df['Type'].str.contains('Deposit|Transfer', na=False, case=False)]['Amount'].apply(clean_value).sum())
+                    j_extra = df[df['Type'].str.contains('Interest', na=False, case=False)]['Amount'].apply(clean_value).sum()
+                    totals['juros'] += j_extra
 
         except: continue
     return pd.DataFrame(all_assets), totals
@@ -106,16 +117,14 @@ if uploaded:
     if not df_res.empty:
         c1, c2, c3, c4 = st.columns(4)
         c1.metric("Património Total", f"€ {df_res['Valor'].sum():,.2f}")
-        c2.metric("Dividendos", f"€ {rends['dividendos']:,.2f}")
+        c2.metric("Dividendos Net", f"€ {rends['dividendos']:,.2f}")
         c3.metric("Juros Líquidos", f"€ {rends['juros']:,.2f}")
-        c4.metric("Capital Injetado", f"€ {rends['depositos']:,.2f}")
+        c4.metric("Injeção Capital", f"€ {rends['depositos']:,.2f}")
         
         st.divider()
         col1, col2 = st.columns([1, 1])
         with col1:
-            st.plotly_chart(px.pie(df_res, values='Valor', names='Cat', hole=0.4, title="Alocação Consolidada"), use_container_width=True)
+            st.plotly_chart(px.pie(df_res, values='Valor', names='Cat', hole=0.4, title="Carteira Consolidada"), use_container_width=True)
         with col2:
-            st.subheader("Lista Detalhada de Ativos")
+            st.subheader("Ativos Atuais")
             st.dataframe(df_res.sort_values('Valor', ascending=False)[['Ativo', 'Valor', 'Fonte']], use_container_width=True)
-    else:
-        st.warning("Carrega os ficheiros na barra lateral.")
