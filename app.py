@@ -21,9 +21,9 @@ def smart_read(file):
     sep = ';' if content.count(';') > content.count(',') else ','
     lines = content.split('\n')
     skip = 0
-    # Procura a linha do cabeçalho
-    for i, line in enumerate(lines[:20]):
-        if any(x in line for x in ['DESCRIÇÃO', 'Ticker', 'Tickers', 'ATIVO', 'APLICADO', 'Em Euros', 'Type', 'Montante', 'Juros']):
+    # Procura a linha do cabeçalho de forma mais abrangente
+    for i, line in enumerate(lines[:25]):
+        if any(x in line for x in ['DESCRIÇÃO', 'Ticker', 'Tickers', 'ATIVO', 'APLICADO', 'Em Euros', 'Type', 'Montante', 'Juros', 'Transação']):
             skip = i
             break
     df = pd.read_csv(io.StringIO(content), sep=sep, skiprows=skip)
@@ -45,7 +45,7 @@ def process_data(uploaded_files):
                 for _, row in temp.iterrows():
                     all_assets.append({'Ativo': row['DESCRIÇÃO'], 'Cat': row['ATIVO'], 'Valor': clean_value(row['APLICADO']), 'Fonte': 'Offline'})
 
-            # 2. XTB ETFs (Analise Setorial)
+            # 2. XTB ETFs
             elif "setorial" in name:
                 t_col = next((c for c in df.columns if 'Ticker' in c or 'Unnamed: 1' in c), None)
                 v_col = next((c for c in df.columns if 'investido' in c or 'Unnamed: 6' in c), None)
@@ -55,7 +55,7 @@ def process_data(uploaded_files):
                         if str(row[t_col]) not in ['Ticker', 'Total', 'nan', 'ETFs']:
                             all_assets.append({'Ativo': row[t_col], 'Cat': 'ETF', 'Valor': clean_value(row[v_col]), 'Fonte': 'XTB'})
 
-            # 3. XTB AÇÕES USD (Ajustado para o teu ficheiro)
+            # 3. XTB AÇÕES USD
             elif "usd" in name or "ações" in name:
                 t_col = next((c for c in df.columns if 'Ticker' in c), None)
                 v_col = next((c for c in df.columns if 'Euros' in c or 'Valor' in c), None)
@@ -69,29 +69,31 @@ def process_data(uploaded_files):
                 for _, row in df.iterrows():
                     all_assets.append({'Ativo': row['Ticker'], 'Cat': 'Ação (Oferta)', 'Valor': clean_value(row['Valor']), 'Fonte': 'Freedom24'})
 
-            # 5. RENDIMENTOS E CASH FLOW
+            # 5. RENDIMENTOS E CASH FLOW (Ajustado para o documento problemático)
             # Juros (XTB)
             if "juros" in name or "capital" in name:
                 j_col = next((c for c in df.columns if 'Juros' in c), None)
                 if j_col: totals['juros'] += df[j_col].apply(clean_value).sum()
 
-            # Dividendos (XTB e Freedom)
-            if "dividendos" in name:
+            # Dividendos (XTB)
+            if "dividendos" in name and "numerário" not in name:
                 d_col = next((c for c in df.columns if 'Ganhos' in c or 'Dividendo' in c), None)
                 if d_col: totals['dividendos'] += df[d_col].apply(clean_value).sum()
             
-            if "transacções" in name or "numerário" in name:
-                if 'Montante' in df.columns:
-                    divs = df[df['Transação'].str.contains('Dividendo', na=False, case=False)]
-                    totals['dividendos'] += divs['Montante'].apply(clean_value).sum()
-
-            # Cash Operations (Histórico XTB)
-            if "cash" in name or "operations" in name:
-                if 'Type' in df.columns and 'Amount' in df.columns:
-                    totals['depositos'] += abs(df[df['Type'].str.contains('Deposit|Transfer', na=False, case=False)]['Amount'].apply(clean_value).sum())
-                    # Também pode haver juros aqui
-                    juros_extra = df[df['Type'].str.contains('Interest', na=False, case=False)]['Amount'].apply(clean_value).sum()
-                    totals['juros'] += juros_extra
+            # Freedom24 - Transações em Numerário
+            if "transacções" in name or "numerário" in name or "cash" in name:
+                # Procura a coluna da descrição da transação e do montante
+                type_col = next((c for c in df.columns if any(x in c for x in ['Transação', 'Type', 'Description', 'Tipo'])), None)
+                val_col = next((c for c in df.columns if any(x in c for x in ['Montante', 'Amount', 'Valor'])), None)
+                
+                if type_col and val_col:
+                    # Filtra por Dividendos (captura "Dividend", "Dividendo", "Div.")
+                    divs = df[df[type_col].astype(str).str.contains('Dividen|Div\.', na=False, case=False)]
+                    totals['dividendos'] += divs[val_col].apply(clean_value).sum()
+                    
+                    # Captura Depósitos se for o relatório de Cash Operations
+                    deps = df[df[type_col].astype(str).str.contains('Deposit|Transfer|Depósito', na=False, case=False)]
+                    totals['depositos'] += abs(deps[val_col].apply(clean_value).sum())
 
         except: continue
     return pd.DataFrame(all_assets), totals
@@ -111,7 +113,9 @@ if uploaded:
         st.divider()
         col1, col2 = st.columns([1, 1])
         with col1:
-            st.plotly_chart(px.pie(df_res, values='Valor', names='Cat', hole=0.4, title="Alocação"), use_container_width=True)
+            st.plotly_chart(px.pie(df_res, values='Valor', names='Cat', hole=0.4, title="Alocação Consolidada"), use_container_width=True)
         with col2:
-            st.subheader("Lista Detalhada")
+            st.subheader("Lista Detalhada de Ativos")
             st.dataframe(df_res.sort_values('Valor', ascending=False)[['Ativo', 'Valor', 'Fonte']], use_container_width=True)
+    else:
+        st.warning("Carrega os ficheiros na barra lateral.")
