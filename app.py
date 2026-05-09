@@ -4,19 +4,25 @@ import plotly.express as px
 import io
 import re
 
-st.set_page_config(page_title="Dashboard Inês 2026", layout="wide")
-
-# --- DICIONÁRIO DE INTELIGÊNCIA SETORIAL ---
-# Adiciona aqui novos tickers conforme precises
+# --- MAPEAMENTO DE SETORES (Baseado na tua carteira) ---
 MAP_SETORES = {
+    # ETFs - USA
     'SXR8': 'ETF - USA', 'VUAA': 'ETF - USA', 'VUSA': 'ETF - USA',
+    # ETFs - Global
     'VWCE': 'ETF - Global', 'IWDA': 'ETF - Global', 'EUNA': 'ETF - Bonds',
+    # ETFs - Tecnologia / Temáticos
     'SXRV': 'ETF - Tecnologia', '2B76': 'ETF - Automação', 'GOAI': 'ETF - IA', 
     'NUKL': 'ETF - Urânio', 'BTCE': 'Cripto - Bitcoin',
+    # Commodities
     '4GLD': 'Commodities - Ouro', 'EGLN': 'Commodities - Prata',
-    'MSFT': 'Ação - Tecnologia', 'NVDA': 'Ação - Tecnologia', 'AAPL': 'Ação - Tecnologia',
-    'O': 'REITs - Imobiliário', 'IQQ6': 'REITs - Imobiliário'
+    # Ações - Tecnologia
+    'MSFT': 'Ação - Tecnologia', 'NVDA': 'Ação - Tecnologia', 'NFLX': 'Ação - Consumo',
+    # Outros / Imobiliário
+    'O': 'REITs - Imobiliário', 'IQQ6': 'REITs - Imobiliário',
 }
+
+def get_sector(ticker):
+    return MAP_SETORES.get(ticker, 'Outros / Não Categorizado')
 
 def clean_val(val):
     if pd.isna(val) or str(val).strip() == '': return 0.0
@@ -46,13 +52,14 @@ def read_file_robust(file):
     return None
 
 def process_data(uploaded_files):
-    assets = []
+    assets, m = [], {'dep': 0.0, 'cash': 0.0}
+    
     for file in uploaded_files:
         df = read_file_robust(file)
         if df is None: continue
         fname = file.name.lower()
 
-        # Captura de Posições
+        # POSIÇÕES (XTB / F24 / OFFLINE)
         if any(x in fname for x in ["setorial", "usd", "ações", "sheet"]):
             t_col = next((c for c in df.columns if 'ticker' in c), None)
             v_col = next((c for c in df.columns if any(x in c for x in ['investido', 'euros', 'total', 'valor'])), None)
@@ -61,57 +68,32 @@ def process_data(uploaded_files):
                 for _, row in df.iterrows():
                     ticker = str(row[t_col]).strip().upper()
                     if len(ticker) > 1 and ticker not in ['TOTAL', 'NAN', 'TICKER']:
-                        # Define a Classe (Gráfico 1) e o Setor (Gráfico 2)
-                        classe = 'ETFs' if 'setorial' in fname else 'Ações Individuais'
-                        setor = MAP_SETORES.get(ticker, '⚠️ Não Categorizado')
+                        # AQUI É ONDE A MÁGICA ACONTECE:
                         assets.append({
                             'Ativo': ticker, 
-                            'Classe': classe, 
-                            'Setor': setor, 
+                            'Setor': get_sector(ticker), 
                             'Valor': clean_val(row[v_col])
                         })
-        
-        elif 'aplicado' in df.columns: # Offline (PPR/Aforro)
+
+        elif 'aplicado' in df.columns: # PPR / Aforro
             for _, row in df[df.get('estado', '').astype(str).str.contains('aberto', na=False, case=False)].iterrows():
-                assets.append({
-                    'Ativo': row['descrição'], 
-                    'Classe': 'PPR / Aforro', 
-                    'Setor': 'PPR / Aforro', 
-                    'Valor': clean_val(row['aplicado'])
-                })
+                assets.append({'Ativo': row['descrição'], 'Setor': 'PPR/Aforro', 'Valor': clean_val(row['aplicado'])})
 
     return pd.DataFrame(assets)
 
-# --- UI ---
-st.title("📊 Análise de Portfólio Inês")
+# --- UI STREAMLIT ---
+st.title("🏢 ANÁLISE SETORIAL DE PORTFÓLIO")
 files = st.sidebar.file_uploader("Upload CSVs", accept_multiple_files=True)
 
 if files:
     df_res = process_data(files)
-    
     if not df_res.empty:
-        # Layout de dois gráficos lado a lado
-        col1, col2 = st.columns(2)
-        
-        with col1:
-            st.subheader("1. Por Classe de Ativos")
-            fig1 = px.pie(df_res, values='Valor', names='Classe', hole=0.4, title="Distribuição Geral")
-            st.plotly_chart(fig1, use_container_width=True)
-            
-        with col2:
-            st.subheader("2. Análise Setorial Detalhada")
-            fig2 = px.pie(df_res, values='Valor', names='Setor', hole=0.4, title="Exposição por Setor/Tipo")
-            st.plotly_chart(fig2, use_container_width=True)
+        # Gráfico Circular Setorial
+        st.subheader("Distribuição por Categoria Financeira")
+        fig = px.pie(df_res, values='Valor', names='Setor', hole=0.4, 
+                     color_discrete_sequence=px.colors.qualitative.Prism)
+        st.plotly_chart(fig, use_container_width=True)
 
-        st.divider()
-
-        # SECÇÃO DE AUDITORIA: O que não está categorizado?
-        st.subheader("🔍 Auditoria de Categorização")
-        df_nao_cat = df_res[df_res['Setor'] == '⚠️ Não Categorizado']
-        
-        if not df_nao_cat.empty:
-            st.warning(f"Foram detetados {len(df_nao_cat)} ativos sem categoria definida.")
-            st.write("Lista de Tickers para adicionar ao código:")
-            st.dataframe(df_nao_cat[['Ativo', 'Valor']], hide_index=True)
-        else:
-            st.success("✅ Todos os ativos estão devidamente categorizados!")
+        # Tabela Detalhada
+        st.subheader("Detalhe por Ativo")
+        st.dataframe(df_res.sort_values('Valor', ascending=False), hide_index=True)
