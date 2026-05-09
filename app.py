@@ -37,7 +37,7 @@ def read_file_robust(file):
             skip = 0
             for i, line in enumerate(lines[:20]):
                 l = line.lower()
-                if any(k in l for k in ['ticker', 'tipo', 'type', 'montante', 'transação', 'descrição', 'ativo', 'time', 'date']):
+                if any(k in l for k in ['ticker', 'tipo', 'type', 'montante', 'transação', 'descrição', 'ativo']):
                     skip = i
                     break
             df = pd.read_csv(io.StringIO(text), sep=sep, skiprows=skip, on_bad_lines='skip', engine='python')
@@ -55,10 +55,10 @@ def process_data(uploaded_files):
         if df is None: continue
         fname = file.name.lower()
 
-        # A. POSIÇÕES ATUAIS (Mantido igual)
+        # A. POSIÇÕES ATUAIS
         if any(x in fname for x in ["setorial", "usd", "ações", "sheet"]):
-            t_col = next((c for c in df.columns if any(k in c for k in ['ticker', 'symbol', 'ativo'])), None)
-            v_col = next((c for c in df.columns if any(k in c for k in ['investido', 'euros', 'total', 'valor'])), None)
+            t_col = next((c for c in df.columns if 'ticker' in c), None)
+            v_col = next((c for c in df.columns if any(x in c for x in ['investido', 'euros', 'total', 'valor'])), None)
             if t_col and v_col:
                 cat_geral = 'ETFs' if 'setorial' in fname else 'Ações Individuais'
                 for _, row in df.iterrows():
@@ -66,58 +66,64 @@ def process_data(uploaded_files):
                     if len(ticker) > 1 and ticker not in ['TOTAL', 'NAN', 'TICKER']:
                         val = clean_val(row[v_col])
                         if val > 0:
-                            assets.append({'Ativo': ticker, 'Cat Geral': cat_geral, 'Setor': MAP_SETORES.get(ticker, '⚠️ Não Categorizado'), 'Valor': val})
+                            assets.append({
+                                'Ativo': ticker,
+                                'Cat Geral': cat_geral,
+                                'Setor': MAP_SETORES.get(ticker, '⚠️ Não Categorizado'),
+                                'Valor': val
+                            })
 
         elif 'aplicado' in df.columns:
             for _, row in df[df.get('estado', '').astype(str).str.contains('aberto', na=False, case=False)].iterrows():
-                assets.append({'Ativo': row['descrição'], 'Cat Geral': 'PPR / Aforro', 'Setor': 'PPR / Aforro', 'Valor': clean_val(row['aplicado'])})
+                assets.append({
+                    'Ativo': row['descrição'],
+                    'Cat Geral': 'PPR / Aforro',
+                    'Setor': 'PPR / Aforro',
+                    'Valor': clean_val(row['aplicado'])
+                })
 
-        # B. PROCURA DINÂMICA DE DATAS E TRANSAÇÕES
-        # Procura colunas que possam ser a Data
-        date_col = next((c for c in df.columns if any(k in c for k in ['date', 'data', 'time', 'tempo', 'registration'])), None)
-        type_col = next((c for c in df.columns if any(k in c for k in ['type', 'tipo', 'transação', 'comment'])), None)
-        amt_col = next((c for c in df.columns if any(k in c for k in ['amount', 'montante', 'valor', 'net'])), None)
-        tick_col = next((c for c in df.columns if any(k in c for k in ['symbol', 'ticker', 'instrument', 'ativo'])), None)
-        unit_col = next((c for c in df.columns if any(k in c for k in ['unit', 'quant', 'volume', 'unid'])), None)
-        
-        if type_col and amt_col:
-            for _, row in df.iterrows():
-                t, v = str(row[type_col]).lower(), clean_val(row[amt_col])
-                
-                # Aquisições (Compra de ativos)
-                if any(buy in t for buy in ['buy', 'compra', 'stocks', 'etf', 'opening']):
-                    # Se não houver ticker na linha, tenta extrair do comentário (comum na XTB)
-                    ticker_final = str(row[tick_col]).upper() if tick_col and pd.notna(row[tick_col]) else "CAIXA"
+        # B. FLUXOS E HISTÓRICO DE AQUISIÇÕES
+        if any(x in fname for x in ["cash", "operations", "numerário", "transacções"]):
+            type_col = next((c for c in df.columns if 'type' in c or 'transação' in c), None)
+            amt_col = next((c for c in df.columns if 'amount' in c or 'montante' in c), None)
+            date_col = next((c for c in df.columns if 'date' in c or 'data' in c or 'time' in c), None)
+            tick_col = next((c for c in df.columns if 'symbol' in c or 'ticker' in c or 'ativo' in c), None)
+            unit_col = next((c for c in df.columns if 'unit' in c or 'quant' in c or 'unid' in c), None)
+            
+            if type_col and amt_col:
+                for _, row in df.iterrows():
+                    t, v = str(row[type_col]).lower(), clean_val(row[amt_col])
                     
-                    history.append({
-                        'Data': str(row[date_col])[:10] if date_col else "N/D",
-                        'Ativo': ticker_final,
-                        'Categoria': MAP_SETORES.get(ticker_final, "Outro"),
-                        'Unidades': row[unit_col] if unit_col else "N/D",
-                        'Valor': abs(v)
-                    })
+                    # Captura para a nova tabela de aquisições (Compra/Stocks/ETFs)
+                    if any(buy in t for buy in ['buy', 'compra', 'stocks', 'etf']):
+                        history.append({
+                            'Data': row[date_col] if date_col else "N/D",
+                            'Ativo': str(row[tick_col]).upper() if tick_col else "N/D",
+                            'Categoria': MAP_SETORES.get(str(row[tick_col]).upper(), "Outro") if tick_col else "N/D",
+                            'Unidades': row[unit_col] if unit_col else "N/D",
+                            'Valor': abs(v)
+                        })
 
-                # Fluxos (Juros/Dividendos)
-                if 'interest' in t or 'juro' in t: m['juros'] += v
-                elif 'dividend' in t or 'societário' in t: m['divs'] += v
-                if any(x in t for x in ['deposit', 'transfer', 'depósito', 'transferência']): m['dep'] += abs(v)
-                if 'withdrawal' in t: m['dep'] -= abs(v)
-                m['cash'] += v
+                    if 'interest' in t or 'juro' in t: m['juros'] += v
+                    elif 'dividend' in t or 'societário' in t: m['divs'] += v
+                    if any(x in t for x in ['deposit', 'transfer', 'depósito', 'transferência']): m['dep'] += abs(v)
+                    if 'withdrawal' in t: m['dep'] -= abs(v)
+                    m['cash'] += v
 
     if m['cash'] > 1:
         assets.append({'Ativo': 'Cash', 'Cat Geral': 'Cash', 'Setor': 'Cash', 'Valor': m['cash']})
 
     return pd.DataFrame(assets), m, pd.DataFrame(history)
 
-# --- UI (Visual Igual ao anterior, mas com a tabela de histórico) ---
+# --- UI INTERFACE ---
 st.title("📊 PORTFÓLIO CONSOLIDADO DA INÊS")
-files = st.sidebar.file_uploader("Upload CSVs", accept_multiple_files=True)
+files = st.sidebar.file_uploader("Arraste os seus CSVs aqui", accept_multiple_files=True)
 
 if files:
     df_res, met, df_history = process_data(files)
     
     if not df_res.empty:
-        # 1. Métricas de Topo (Mantido)
+        # 1. MÉTRICAS DE TOPO
         pat_total = df_res['Valor'].sum()
         lucro_abs = pat_total - met['dep']
         lucro_perc = (lucro_abs / met['dep'] * 100) if met['dep'] > 0 else 0
@@ -135,7 +141,7 @@ if files:
 
         st.divider()
 
-        # 2. Gráficos
+        # 2. GRÁFICOS
         st.subheader("[ 🌍 DISTRIBUIÇÃO E ALOCAÇÃO ]")
         col_left, col_right = st.columns(2)
         with col_left:
@@ -143,17 +149,16 @@ if files:
         with col_right:
             st.plotly_chart(px.pie(df_res, values='Valor', names='Setor', hole=0.5, title="Análise Setorial (Micro)"), use_container_width=True)
 
-        # 3. TABELA DE ÚLTIMAS AQUISIÇÕES (CORRIGIDA)
+        # 3. NOVA TABELA: ÚLTIMAS AQUISIÇÕES
         st.divider()
         st.subheader("🕒 Últimas Aquisições")
         if not df_history.empty:
-            # Filtra linhas onde o ativo é "N/D" ou "CAIXA" para limpar a tabela
-            df_hist_clean = df_history[df_history['Ativo'] != 'N/D']
-            # Ordena por data (assumindo formato YYYY-MM-DD ou similar)
-            df_hist_clean = df_hist_clean.sort_values('Data', ascending=False)
-            st.dataframe(df_hist_clean.head(15), use_container_width=True, hide_index=True)
+            # Tenta converter para data para ordenar corretamente
+            df_history['Data Sort'] = pd.to_datetime(df_history['Data'], errors='coerce')
+            df_history = df_history.sort_values('Data Sort', ascending=False).drop(columns=['Data Sort'])
+            st.dataframe(df_history.head(10), use_container_width=True, hide_index=True)
         else:
-            st.info("💡 Dica: Para ver as aquisições, certifique-se de carregar o ficheiro de 'Histórico de Operações' ou 'Cash Operations'.")
+            st.info("Nenhuma transação de compra detectada nos ficheiros carregados.")
 
         # 4. TABELA DE AUDITORIA
         st.divider()
